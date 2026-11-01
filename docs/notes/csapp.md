@@ -773,3 +773,45 @@ $$
 \mathrm{BlocksPerGrid} = \left\lceil \cfrac{n}{4 \times \mathrm{ThreadsPerBlock}} \right\rceil
 $$
 
+### 加入哨兵
+
+在写 `CUDA` 的时候，最常出现的问题就是越界问题。当我 `cudamalloc(&a, bytes)`，但是却访问到了 `a[bytes / (sizeof(int)) + 10]`，编辑器是并不会报错的。甚至运行结果都没有问题。但是如果越界修改的位置再次被访问，就会造成非常难查的问题。
+
+因此可以用加入哨兵的方法来检查是否越界。比如我在数组前后分别加入 `PAD = 64` 个哨兵元素，那么如果我访问到了哨兵元素并且修改了他，是可以用精确的方法检查出来的。
+
+如果加入哨兵元素我们要改哪些部分？
+
+1.    
+
+
+```c++
+cudaMemset(d_out, 0xFF, bytes);
+```
+
+先将整个数组填充成 `0xFFFFFFFF`（也就是 `-1`）。接下来如果只在 `PAD ~ n + PAD` 范围内操作，`0 ~ PAD - 1` 和 `n + PAD ~ n + 2 * PAD` 范围内的数仍然会保持 `-1`。
+
+2.     
+
+```cpp
+int *_d_out = d_out + PAD;
+order<<<BlocksPerGrid, ThreadsPerBlock>>>(_d_out, n);
+```
+
+这个部分是将整个数组平移后再传入，避免从头部寻址的麻烦。
+
+3.      
+
+```cpp
+for (int i = 0; i < PAD; i ++ )
+    if (h_out[i] != -1) {
+        printf("out of bound at %d\n", i);
+    }
+for (int i = n + PAD; i < n + 2 *PAD; i ++ )
+    if (h_out[i] != -1) {
+        printf("out of bound at %d\n", i);
+    }
+```
+
+这部分是来检查是否越界。如果越界了，那么越界部分的值被改动，就不会保持 `-1`。
+
+这样就成功添加了哨兵元素。
