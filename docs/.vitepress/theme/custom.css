@@ -150,3 +150,61 @@
   border: 0;
   background: #0a0e14;
 }
+
+/* ==========================================================================
+   正文使用 LaTeX 的 Computer Modern / Latin Modern Roman
+   （字体文件在 docs/public/fonts/，woff2，浏览器端加载，访客不用装字体）
+   ========================================================================== */
+@font-face {
+  font-family: 'Latin Modern Roman';
+  src: url('/fonts/lmroman10-regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Latin Modern Roman';
+  src: url('/fonts/lmroman10-bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Latin Modern Roman';
+  src: url('/fonts/lmroman10-italic.woff2') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Latin Modern Roman';
+  src: url('/fonts/lmroman10-bolditalic.woff2') format('woff2');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* 只改正文（.vp-doc），侧边栏/导航栏仍是无衬线，界面更清爽 */
+.vp-doc {
+  font-family: 'Latin Modern Roman', 'Songti SC', 'STSong', 'SimSun',
+    'Source Han Serif SC', 'Noto Serif CJK SC', Georgia, serif;
+  line-height: 1.78;
+}
+
+/* 标题跟着走，别再被 VitePress 的 UI 字体盖掉 */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4,
+.vp-doc h5,
+.vp-doc h6 {
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+/* 中文（宋体风格）+ 西文（CM）混排时，行高稍稍放松 */
+.vp-doc p,
+.vp-doc li,
+.vp-doc blockquote {
+  line-height: 1.78;
+}
