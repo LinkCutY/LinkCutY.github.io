@@ -50,7 +50,12 @@ export default defineConfig({
   title: "LinkCutY's blog",
   description: 'CSAPP、操作系统、并行计算的学习笔记',
   lastUpdated: true,
-  head: [['link', { rel: 'icon', href: '/favicon.svg' }]],
+  head: [
+    ['link', { rel: 'icon', href: '/favicon.svg' }],
+    // 让浏览器加载外链图片时不带 Referer，
+    // 否则博客园 / 知乎这类有防盗链的图床会返回 403
+    ['meta', { name: 'referrer', content: 'no-referrer' }],
+  ],
   markdown: {
     math: true,
     config(md) {
