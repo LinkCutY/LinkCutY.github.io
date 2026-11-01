@@ -53,6 +53,12 @@ export default defineConfig({
             { text: 'LaTeX 踩坑速查', link: '/notes/latex' },
           ],
         },
+        {
+          text: '站务',
+          items: [
+            { text: '这个站怎么用', link: '/notes/guide' },
+          ],
+        },
       ],
     },
     outline: { level: [2, 3], label: '本页目录' },
