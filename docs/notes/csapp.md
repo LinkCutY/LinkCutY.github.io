@@ -1,5 +1,3 @@
-# CSAPP 深入理解计算机系统笔记
-
 开一个天坑，记录从 $0$ 开始学习 CSAPP 的历程。
 
 ## 第一章 $\text{Course-interview}$
@@ -539,11 +537,11 @@ hello.c --------------> hello.i ------------------> hello.s
 
 这里让 agent 做了一个图形化界面帮助理解；中间还进行了对话解决了一些问题；
 
-![img1](/images/csapp/01.png)
+![img1](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234308030-1873209154.png)
 
 这是一个加法程序开始前的状态。在开始后，首先将可执行文件中的机器码从磁盘载入主存（实际是按需分页，用到哪页读哪页）
 
-![img2](/images/csapp/02.png)
+![img2](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234316153-700647508.png)
 
 接下来，CPU 读程序入口，然后将一个地址发给主存（内存）。这里 agent 解决的几个关键问题：
 
@@ -551,31 +549,31 @@ hello.c --------------> hello.i ------------------> hello.s
 - 发出的地址只是一个读请求，并不涉及程序的内容。这是 CPU 想要读取该地址上的内容。
 - 返回的内容是请求读取的那部分指令，这个过程就是取指。
 
-![img3](/images/csapp/03.png)
+![img3](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234320617-525747745.png)
 
 接下来，主存读到地址并返回该地址的指令（应该是虚拟地址后面要转换），指令存进指令寄存器 $\mathbf{IR}$。一个重点是，这里 `LOAD A` 并不是将 `a` 取出，而是返回了一个指令。这反映了 `CPU` 是运算与控制单元、也是唯一能「理解」指令的地方；程序相关的内容需要让主存（实际是 `cache`）告诉他。
 
 这里，`LOAD A` 是一条指令的语义，而这条指令是属于指令集的。
 
-![img4](/images/csapp/04.png)
+![img4](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234409076-1569365282.png)
 
 接下来，CPU 从 `LOAD A` 中译出 $a$ 的地址，向主存（`cache`）发射请求，取回 $a$ 存入一个寄存器；取 $b$ 是**另一条指令**（如 `LOAD B`），需要再走一遍取指、译码、访存。
 
-![img5](/images/csapp/05.png)
+![img5](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234419663-2083331819.png)
 
-![img6](/images/csapp/06.png)
+![img6](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234428124-662347567.png)
 
 之后，寄存器将 $a, b$ 输出到运算单元 `ALU`，进行运算后返回另外一个寄存器存储。
 
-![img7](/images/csapp/07.png)
+![img7](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234434835-56029391.png)
 
-![img8](/images/csapp/08.png)
+![img8](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234441134-73287964.png)
 
 寄存器将结果通过总线写回主存；输出时由 CPU 把数据送到图形适配器（真实路径是系统调用 → 终端 → 显卡），主存不会主动转发。
 
-![img9](/images/csapp/09.png)
+![img9](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234448317-1237687403.png)
 
-![img10](/images/csapp/10.png)
+![img10](https://img2024.cnblogs.com/blog/2701929/202610/2701929-20261029234454210-2113706013.png)
 
 ### 缓存
 
@@ -713,7 +711,61 @@ __global__ void order(int *a, int n) {
 
 这个部分是用来清空内存和显存的。如果不清空，循环连续跑多次 `kernel` 就会炸掉显存。
 
+### 如何编译运行
+
+平时在编译运行 C++ 的时候，我们都会使用
+
+```bash
+g++ A.cpp -o A
+./A
+```
+
+来编译运行一个 `cpp` 文件。对于 `CUDA`，只需要将编译器等替换即可。
+
+`CUDA` 虽然使用 c 语言写，但是编译器并不用 `gcc` / `g++`，而是使用 `nvcc`（大概是 `Nvidia cpp compiler` 吧）。
+
+因此我们可以使用：
+
+```bash
+nvcc vectoradd.cu -o vectoradd && ./vectoradd
+```
+
+来编译运行 `vectoradd.cu` 这个 `CUDA`。
+
+后面对于多文件的系统，将会需要使用 `makefile`。
+
 ### 一个线程处理多个元素
 
 现在一个线程里只做 `a[i] = i`。如果能在一个线程内做完 `a[i] = i, a[i + 1] = i + 1, a[i + 2] = i + 2, a[i + 3] = i + 3`，这样会省很多时间。
+
+这个部分怎么改呢？首先我们先改一下 `kernel`：
+
+```cpp
+__global__ void order(int *a, int n) {
+    // 这是原先的代码
+    // int i = blockDim.x * blockIdx.x + threadIdx.x;
+    // 这是现在的代码
+    int i = 4 * (blockDim.x * blockIdx.x + threadIdx.x);
+    for (int j = i; j < i + 3 && j < n; j ++ )
+        a[j] = j;
+    //if (i < n) a[i] = i;
+}
+```
+
+- Q：这里为什么要乘以 $4$？
+- A: 因为每个线程都处理四个 `index`，所以如果我们现在在第 `k`（`1 - indexed`）个线程，那么前面 `4 * (k - 1)` 个线程都已经做完了。
+  
+那么主函数需要改动什么呢？
+
+我们的 `ThreadsPerBlock` 是理论最优值不需要动，那么这时候根据任务总数 $n$，总线程数 $\mathrm{ThreadsPerBlock}$，每个线程处理四个任务，能得出方程：
+
+$$
+\mathrm{BlocksPerGrid} \times \mathrm{ThreadsPerBlock} \times 4 \ge n
+$$
+
+反解出
+
+$$
+\mathrm{BlocksPerGrid} = \left\lceil \cfrac{n}{4 \times \mathrm{ThreadsPerBlock}} \right\rceil
+$$
 
