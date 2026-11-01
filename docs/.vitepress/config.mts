@@ -6,22 +6,40 @@ import path from 'node:path'
 // 部署位置：用户站 BASE=/，项目站 BASE=/仓库名/
 const base = process.env.BASE || '/'
 
-// 自动扫 docs/notes/*.md 生成左侧目录：
-//   文件名 -> 网址，文件里第一个 "# 标题" -> 目录里显示的名字
-// 所以加笔记 / 删笔记都不用改这个文件
+// 去掉 Markdown 记号，取正文第一段当卡片摘要
+function firstParagraph(src: string) {
+  const lines = src.replace(/^\uFEFF/, '').split(/\r?\n/)
+  for (const raw of lines) {
+    const l = raw.trim()
+    if (!l) continue
+    if (/^(#|>|\||!\[|-{3})/.test(l)) continue
+    return l
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\$[^$]*\$/g, '')
+      .replace(/[\x60*_~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 90)
+  }
+  return ''
+}
+
+// 自动扫 docs/notes/*.md：文件名是网址，第一个 "# 标题" 是显示名
 function scanNotes() {
-  const dir = path.resolve(process.cwd(), 'docs/notes')
-  if (!fs.existsSync(dir)) return []
+  const notesDir = path.resolve(process.cwd(), 'docs/notes')
+  if (!fs.existsSync(notesDir)) return []
   return fs
-    .readdirSync(dir)
+    .readdirSync(notesDir)
     .filter((f) => f.endsWith('.md') && f !== 'index.md')
     .sort()
     .map((f) => {
-      const src = fs.readFileSync(path.join(dir, f), 'utf8').replace(/^\uFEFF/, '')
+      const src = fs.readFileSync(path.join(notesDir, f), 'utf8')
       const m = src.match(/^#\s+(.+)$/m)
       return {
         text: (m ? m[1] : f.replace(/\.md$/, '')).trim(),
         link: '/notes/' + f.replace(/\.md$/, ''),
+        excerpt: firstParagraph(src),
       }
     })
 }
@@ -29,8 +47,8 @@ function scanNotes() {
 export default defineConfig({
   base,
   lang: 'zh-CN',
-  title: '奇怪小问题',
-  description: '一个用 Markdown 写、用 GitHub Pages 发布的笔记本',
+  title: "LinkCutY's blog",
+  description: 'CSAPP、操作系统、并行计算的学习笔记',
   lastUpdated: true,
   head: [['link', { rel: 'icon', href: '/favicon.svg' }]],
   markdown: {
@@ -40,10 +58,7 @@ export default defineConfig({
     },
   },
   themeConfig: {
-    nav: [
-      { text: '笔记', link: '/notes/', activeMatch: '/notes/' },
-      { text: '关于', link: '/about' },
-    ],
+    nav: [],
     sidebar: {
       '/notes/': [{ text: '笔记', items: scanNotes() }],
     },
@@ -63,7 +78,6 @@ export default defineConfig({
     sidebarMenuLabel: '目录',
     returnToTopLabel: '回到顶部',
     footer: {
-      message: '用 Markdown 写，用 GitHub Pages 发。',
       copyright: '© 2026 LinkCutY',
     },
   },

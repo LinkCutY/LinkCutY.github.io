@@ -13,6 +13,88 @@
   width: 100%;
 }
 
+/* 首页：收紧 hero 的留白，标题下面不要空一大片 */
+.VPHome .VPHero {
+  padding: 88px 24px 8px !important;
+}
+
+.VPHome .VPHero .container {
+  max-width: 1152px;
+}
+
+.VPHome .VPHero .name {
+  font-size: 46px;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+}
+
+.VPHome .vp-doc.container {
+  padding-top: 0;
+}
+
+.VPHome .vp-doc h2:first-child {
+  margin-top: 24px;
+}
+
+/* 笔记卡片：一行 3~4 个，高 ≈ 宽 × 0.618 */
+.note-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 16px;
+  margin: 22px 0 8px;
+}
+
+.note-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 18px 16px;
+  aspect-ratio: 1.618 / 1;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 12px;
+  background-color: var(--vp-c-bg-soft);
+  text-decoration: none !important;
+  overflow: hidden;
+  transition: border-color 0.2s, background-color 0.2s, transform 0.2s;
+}
+
+.note-card:hover {
+  border-color: var(--vp-c-brand-1);
+  background-color: var(--vp-c-bg-alt);
+  transform: translateY(-2px);
+}
+
+.note-card__title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--vp-c-text-1);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.note-card__excerpt {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@media (max-width: 640px) {
+  .note-grid {
+    grid-template-columns: 1fr;
+  }
+  .note-card {
+    aspect-ratio: auto;
+    min-height: 120px;
+  }
+}
+
 /* 内嵌演示的外框 */
 .demo-frame {
   margin: 24px 0;
