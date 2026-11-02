@@ -815,3 +815,392 @@ for (int i = n + PAD; i < n + 2 *PAD; i ++ )
 这部分是来检查是否越界。如果越界了，那么越界部分的值被改动，就不会保持 `-1`。
 
 这样就成功添加了哨兵元素。
+
+## 算子优化初步
+
+下面是一个普通的算子，这个算子用来做矩阵转置：
+
+```cpp
+#include <cstdio>
+#include <cstdlib>
+#include "cuda_utils.h"
+
+__global__ void transposeNaive(const float* in, float* out, int n) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ix < n && iy < n) {
+        out[ix * n + iy] = in[iy * n + ix];
+    }
+}
+
+int main() {
+    const int ns[] = {1024, 2048, 4096};
+
+    for (int t = 0; t < 3; t++) {
+        int    n     = ns[t];
+        size_t elems = (size_t)n * n;
+        size_t bytes = elems * sizeof(float);
+        
+        float*  h   = (float*) malloc(bytes);
+        float*  h2  = (float*) malloc(bytes);
+        double* ref = (double*)malloc(elems * sizeof(double));
+        
+        float *d_in, *d_out;
+        CUDA_CHECK(cudaMalloc(&d_in,  bytes));
+        CUDA_CHECK(cudaMalloc(&d_out, bytes));
+        
+        for (size_t i = 0; i < elems; i++) h[i] = (float)(i % 97);
+
+        // 参考实现：ref[r][c] = h[c][r]
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                ref[i * n + j] = h[j * n + i];
+
+        CUDA_CHECK(cudaMemcpy(d_in, h, bytes, cudaMemcpyHostToDevice));
+
+        dim3 block(32, 32);
+        dim3 grid(128, 128);
+
+        transposeNaive<<<grid, block>>>(d_in, d_out, n);
+        CUDA_CHECK_LAUNCH();
+
+        CUDA_CHECK(cudaMemcpy(h2, d_out, bytes, cudaMemcpyDeviceToHost));
+        verify("transpose", h2, ref, (int)elems);
+
+        float ms = bench([&]{ transposeNaive<<<grid, block>>>(d_in, d_out, n); });
+        double gbs = (double)bytes * 2 / (ms * 1e6);
+        printf("n=%5d  min %8.4f ms  %7.1f GB/s  = %5.1f%% of 384\n",
+               n, ms, gbs, gbs / 384.0 * 100.0);
+
+        free(h); free(h2); free(ref);
+        cudaFree(d_in); cudaFree(d_out);
+    }
+    return 0;
+}
+```
+
+（其中有计时器等部分。暂时略过）
+
+可以看一下运行速度：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.2315 ms     36.2 GB/s  =   9.4% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.4100 ms     81.8 GB/s  =  21.3% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   1.2390 ms    108.3 GB/s  =  28.2% of 384
+```
+
+最后一列是理论的最优速度。可以看到现在的初版代码非常非常慢。
+
+下面来逐步优化这个算子
+
+### 合理 Tiling
+
+可以看到我们现在的参数是：
+
+```cpp
+dim3 block(32, 32);
+dim3 grid(128, 128);
+```
+
+这是一个固定的长度。显然 $32 * 128 = 4096$ 在 $n = 1024$ 和 $2048$ 的时候远远大于了 $n$。这时候就会有大量的 `block` 闲置。虽然他们不参与计算（在 `if (ix < n && iy < n)` 部分被排除了），但是在排除之前的判断也是需要花费时间的。另外，这些空的线程也占用 `warp`，导致许多 `block` 等待。
+
+这里先解释一下什么是 `warp`：线程进入 `SM` 参与运算并不是一个一个进入的，而是每次进入多个。每次进入的个数取决于机器，本机按照 $32$ 来计算。我们后面会用到它。
+
+先来解决这个空转问题：解决闲置（非法）`threads` 进入的办法就是让 `ix >= n || iy >= n` 的个数尽可能少。那显然我们可以将 `grid` 写成：
+
+$$
+\left  (\left\lceil \cfrac{n}{\mathrm{block.x}} \right\rceil, \left\lceil \cfrac{n}{\mathrm{block.y}} \right\rceil \right )
+$$
+
+这样对 $n$ 适应性的分块方式在 $ < 4096$ 的数据上可以有效解决闲置的问题。
+
+可以看一下现在的代码速度：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0761 ms    110.3 GB/s  =  28.7% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.2850 ms    117.7 GB/s  =  30.7% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   1.2390 ms    108.3 GB/s  =  28.2% of 384
+```
+
+可以看到，在 $n = 4096$ 的时候没有优化（tiling 方式不变），但是在 $1024$ 和 $2048$ 的数据下，优化幅度甚至达到了 $3 \times$。
+
+### 合理 tiling 2
+
+解决了 `grid`，我们来看一下 `block` 的 `(32, 32)` 能不能优化。
+
+回想之前的 `warp`。对于本机，我运行了：
+
+```cpp
+cudaDeviceProp p;
+cudaGetDeviceProperties(&p, 0);
+printf("maxThreadsPerMultiProcessor %d\n", p.maxThreadsPerMultiProcessor);
+```
+
+得到了每个 `SM` 的线程数总上限为 $1536$。我们 `block` 的第一维必须是 $32$ 倍数，不妨就让他是 $32$。如果按照我们第二维也是 $32$ 来算，那么一个 `block` 内的线程数就是 $32 \times 32 = 1024$。
+
+这令我们陷入一个比较尴尬的境地：一个 `SM` 内只能载入一个 `block`，但是不满。如果载入两个 `block`，空间又不够。这样造成了算力的大量浪费。
+
+因此我们希望能够计算出能塞满 `block` 的 tiling 方式。
+
+线程总数按照 $\text{max} = 1536$ 计算，$\cfrac{1536}{32} = 48$。这说明我们的 `block.y` 必须整除 $48$ 才能塞满 `SM`。
+
+比如我们取 `block.y = 16`。这样一个 `SM` 可以恰好载入三个 `block`。并没有造成浪费。看一下输出结果：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0542 ms    154.7 GB/s  =  40.3% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.1948 ms    172.3 GB/s  =  44.9% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.7929 ms    169.3 GB/s  =  44.1% of 384
+```
+
+可以看到，有了大约 $1.5 \times$ 的优化。如果将 `block` 改成 `(32, 8)`（这样每个 `SM` 可以载入六个块），则结果为：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0420 ms    199.7 GB/s  =  52.0% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.1526 ms    219.9 GB/s  =  57.3% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.6710 ms    200.0 GB/s  =  52.1% of 384
+```
+
+我们的代码得到了进一步的优化。
+
+改为 $6$ 则得到
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0397 ms    211.4 GB/s  =  55.1% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.1464 ms    229.1 GB/s  =  59.7% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.6586 ms    203.8 GB/s  =  53.1% of 384
+```
+
+但是 `tiling` 并不是越小越好。比如如果将 `block.y` 改为 `4`，在本机运行的结果性能略微下降。这里后面会谈到原因。
+
+### Shared memory
+
+`shared memory` 是一个非常重要的优化方法。这里先引入一下使用它的原因：
+
+先观察一下 `transposeNaive` 这个 `kernel`：
+
+```cpp
+__global__ void transposeNaive(const float* in, float* out, int n) {
+    int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    if (ix < n && iy < n) {
+        out[ix * n + iy] = in[iy * n + ix];
+    }
+}
+```
+
+我们知道，当访问内存连续的时候，算法的速度会显著加快，而不连续则会降低空间局部性导致变慢。
+
+这时候看到 `out[ix * n + iy]`。我们在运行线程的时候是 `threadIdx.y`，`blockIdx.x`，`blockIdx.y` 不突变（不是不变），`threadIdx.x` 逐渐增加的。因此 `ix` 是逐渐增加的。因此 `out[ix * n + iy]` 实际上是按照步长为 `n` 来变化的。这样内存的访问是不连续的。
+
+那么如果改为 `out[iy * n + ix] = in[ix * n + iy]` 呢？仍然不行。这样 `in` 的访存又不连续了。
+
+那么我们有没有办法将他们的访存都变成连续的呢？答案是：有的。这需要引入 `__syncthreads()` 和 `shared memory`。
+
+先解释 `shared memory`：这是每个 `block` 内所有的线程公用的 `memory`。我们有 `128 * 128 = 16384` 个 `block` 的话，就会有 `16384` 个 `shared memory`。
+
+再说 `__syncthreads()`：这是一个等待函数，它的含义是：等到整个 `block` 内的所有线程都做完之前的任务后，再进行下面的操作。
+
+我们设计这样一个算法：首先定义一个 `__shared__ float tile[TILE][TILE]` 的数组，这个 `__shared__` 表示这个临时数组是开在 `shared memory` 里的。
+
+刚才说过，`out[ix * n + iy] = in[iy * n + ix];` 会导致 `out` 访存不连续，而倒过来会让 `in` 访存不连续。那么如果能让 `in` 以访存连续的方式先存入 `tile`，再让 `tile` 以访存连续的方式写入 `out`，就可以让两步都达到连续的目的。
+
+让 `in` 以访存连续的方式写入 `tile` 的方式：
+
+```cpp
+int x = blockIdx.x * TILE + threadIdx.x;
+int y = blockIdx.y * TILE + threadIdx.y;
+if (x < n && y < n)
+    tile[threadIdx.y][threadIdx.x] = in[y * n + x];
+```
+
+（这里取 `dim3 block(32, 32)`，`TILE = block.x = block.y = 32`）
+
+这时候，每次 `x` 加一，`y` 不变，可以看到，`in` 中下标只在第二维增加 $1$，在内存中是连续的。存入 `tile` 的时候，同样是连续的。存入的时候已经完成了子矩阵转置。
+
+接下来我们加入 `__syncthreads()`，等待上面写入 `tile` 的操作完成。
+
+接下来做 `tile -> out` 的工作：
+
+```cpp
+x = blockIdx.y * TILE + threadIdx.x;
+y = blockIdx.x * TILE + threadIdx.y;
+if (x < n && y < n)
+    out[y * n + x] = tile[threadIdx.x][threadIdx.y]; 
+```
+
+首先不难发现 `out` 和 `tile` 访存都是连续的。这里解释一下为什么 `x, y` 要定义成这样。
+
+刚才子矩阵（`tile`）内已经将 `block` 内的矩阵转置了。现在将这个转置的矩阵存入 `out`。
+
+这里很容易将 `x` 写成 `blockIdx.y * TILE + threadIdx.y`。来看看这样写有什么问题。
+
+如果我们这样写，那么写入这个位置的数据在原矩阵对应 `(blockIdx.x * TILE + threadIdx.x, blockIdx.y * TILE + threadIdx.y)`。
+
+再看这个数据在 `tile` 中的位置：应当是 `tile[threadIdx.y][threadIdx.x]`。
+
+写出来完成代码：
+
+```cpp
+x = blockIdx.y * TILE + threadIdx.y;
+y = blockIdx.x * TILE + threadIdx.x;
+out[y * n + x] = tile[threadIdx.y][threadIdx.x];
+```
+
+现在来看 `tile` 的访存步长是连续的。但是 `out` 的步长是 `n`。
+
+而按照我们原来的写法：将原本转置的矩阵再转置两次，`out` 的访存连续，而 `shared memory` 的访存步长变成了 `TILE`。
+
+这里有两个好处：第一，`TILE` 比 `n` 小得多，可以忽略不计，这样我们的访存连续性更好。
+
+第二，`shared memory` 真正害怕的是访存 `bank` 而不是访存连续性。
+
+因此我们使用原本的写法更优。
+
+这样我们来测试一下代码的速度：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0392 ms    213.8 GB/s  =  55.7% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.1433 ms    234.2 GB/s  =  61.0% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.7911 ms    169.7 GB/s  =  44.2% of 384
+```
+
+和原本 `block(32, 32)` 的速度对比：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0761 ms    110.3 GB/s  =  28.7% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.2850 ms    117.7 GB/s  =  30.7% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   1.2390 ms    108.3 GB/s  =  28.2% of 384
+```
+
+速度有了明显提升！
+
+接下来将 `block tiling` 改一下，让 `SM` 填满整块。
+
+当 `block(32, 16)`：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0383 ms    218.8 GB/s  =  57.0% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.1370 ms    245.0 GB/s  =  63.8% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.7018 ms    191.3 GB/s  =  49.8% of 384
+```
+
+### 减少 Bank Conflict
+
+当我们访问 `tile` 的时候，实际访问的内存相对位置是 `threadIdx.x * TILE + threadIdx.y`（这里是针对 `shared memory -> out`）。
+
+先解释一下什么是 `bank`：`shared memory` 在物理上被切成 $32$ 块并行的子存储器，每块 $4$ 字节宽，一块就叫一个 `bank`。
+
+计算访存位置在哪个子存储器的时候，算法是将位置模 $32$。这时候，我们如果 `TILE = 32`，可以看到，`threadIdx.x * TILE + threadIdx.y`。
+
+前者对 $32$ 取模是 $0$，所以所有的访问落到 $\text{threadIdx.y} \mod 32$ 上。这样就造成了 `bank conflict`。
+
+解决的办法非常简单：只需要让 `threadIdx.x * TILE + threadIdx.y` 不只依赖 `threadIdx.y` 即可。最简单的改动方式就是 `TILE -> TILE + 1`，这样模三十二之后变成 `threadIdx.x + threadIdx.y`。而 `threadIdx.y` 又可以视作不变，因此访问子存储器是连续的。
+
+这样改后的代码速度：
+
+```bash
+  [transpose] PASS  bad=0/1048576
+n= 1024  min   0.0258 ms    325.2 GB/s  =  84.7% of 384
+  [transpose] PASS  bad=0/4194304
+n= 2048  min   0.0930 ms    360.8 GB/s  =  94.0% of 384
+  [transpose] PASS  bad=0/16777216
+n= 4096  min   0.5813 ms    230.9 GB/s  =  60.1% of 384
+```
+
+可以看到速度提升非常大！
+
+下面是完整代码：
+
+```cpp
+#include <cstdio>
+#include <cstdlib>
+#include "cuda_utils.h"
+
+#define TILE 32
+
+__global__ void transposeShared(const float* in, float* out, int n) {
+    __shared__ float tile[TILE][TILE + 1];
+    int x = blockIdx.x * TILE + threadIdx.x;
+    for (int k = 0; k < TILE; k += blockDim.y) {
+        int y = blockIdx.y * TILE + threadIdx.y + k;
+        if (x < n && y < n)
+            tile[threadIdx.y + k][threadIdx.x] = in[y * n + x];
+    }
+    __syncthreads();
+
+    x = blockIdx.y * TILE + threadIdx.x;
+    for (int k = 0; k < TILE; k += blockDim.y) {
+        int y = blockIdx.x * TILE + threadIdx.y + k;
+        if (x < n && y < n)
+            out[y * n + x] = tile[threadIdx.x][threadIdx.y + k];
+    }
+}
+
+int main() {
+    const int ns[] = {1024, 2048, 4096};
+
+    for (int t = 0; t < 3; t++) {
+        int    n     = ns[t];
+        size_t elems = (size_t)n * n;
+        size_t bytes = elems * sizeof(float);
+
+        float*  h   = (float*) malloc(bytes);
+        float*  h2  = (float*) malloc(bytes);
+        double* ref = (double*)malloc(elems * sizeof(double));
+
+        float *d_in, *d_out;
+        CUDA_CHECK(cudaMalloc(&d_in,  bytes));
+        CUDA_CHECK(cudaMalloc(&d_out, bytes));
+
+        for (size_t i = 0; i < elems; i++) h[i] = (float)(i % 97);
+
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                ref[i * n + j] = h[j * n + i];
+
+        CUDA_CHECK(cudaMemcpy(d_in, h, bytes, cudaMemcpyHostToDevice));
+
+        dim3 block(32, 16);
+        dim3 grid((n + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+
+        transposeShared<<<grid, block>>>(d_in, d_out, n);
+        CUDA_CHECK_LAUNCH();
+
+        CUDA_CHECK(cudaMemcpy(h2, d_out, bytes, cudaMemcpyDeviceToHost));
+        verify("transpose", h2, ref, (int)elems);
+
+        float ms = bench([&]{ transposeShared<<<grid, block>>>(d_in, d_out, n); });
+        double gbs = (double)bytes * 2 / (ms * 1e6);
+        printf("n=%5d  min %8.4f ms  %7.1f GB/s  = %5.1f%% of 384\n",
+               n, ms, gbs, gbs / 384.0 * 100.0);
+
+        free(h); free(h2); free(ref);
+        cudaFree(d_in); cudaFree(d_out);
+    }
+    return 0;
+}
+```
