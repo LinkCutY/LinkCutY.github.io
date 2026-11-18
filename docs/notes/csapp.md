@@ -1204,3 +1204,46 @@ int main() {
     return 0;
 }
 ```
+
+## 第五章
+
+整个章节是围绕着对 `combine1` 这样一个函数的优化展开的。首先看一下前置环境：作者先手写了一个 `vector`：
+
+```cpp
+vec_ptr new_vec(long len) {
+    vec_ptr v = (vec_ptr)malloc(sizeof(vec_rec));
+    if (!v) return NULL;
+    v -> len = len;
+    v -> data = (data_t *)calloc((size_t)len, sizeof(data_t));
+    if (!v -> data) { free(v); return NULL; }
+    return v;
+}
+long vec_length(vec_ptr v) {
+    return v -> len;
+}
+
+data_t *get_vec_start(vec_ptr v) {
+    return v -> data;
+}
+int get_vec_element(vec_ptr v, long index, data_t *dest) {
+    if (index < 0 || index >= v -> len)
+        return 0;
+    *dest = v -> data[index];
+    return 1;
+}
+```
+
+然后给出了初版的 `combine1`，用于实现一个 `vector` 中所有数的乘积。
+
+```cpp
+void combine1(vec_ptr v, data_t *dest) {
+    long i;
+    *dest = 1;
+    for (i = 0; i < vec_length(v); i ++ ) {
+        data_t val;
+        get_vec_element(v, i, &val);
+        *dest *= val;
+    }
+}
+```
+

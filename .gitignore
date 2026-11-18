@@ -4,3 +4,19 @@ docs/.vitepress/cache/
 .DS_Store
 Thumbs.db
 *.log
+
+# LaTeX 编译中间产物（.tex / .pdf 会保留）
+*.aux
+*.out
+*.synctex*
+*.fls
+*.fdb_latexmk
+*.toc
+*.bbl
+*.blg
+*.xdv
+
+# notes 目录里的 LaTeX 源文件和导出的 PDF 不进仓库
+# （要让读者下载，把它们放到 docs/public/files/ 里）
+docs/notes/*.tex
+docs/notes/*.pdf
